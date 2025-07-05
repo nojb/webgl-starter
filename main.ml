@@ -1,0 +1,228 @@
+open Brr
+open Brr_canvas
+
+let compile_shader gl type_ src =
+  let shader = Gl.create_shader gl type_ in
+  Gl.shader_source gl shader (Jstr.v src);
+  Gl.compile_shader gl shader;
+  let success = Gl.get_shader_parameter gl shader Gl.compile_status |> Jv.to_bool in
+  if success then
+    Ok shader
+  else
+    let info_log = Gl.get_shader_info_log gl shader |> Jstr.to_string in
+    Error (Printf.sprintf "Failed to compile shader!\n%s" info_log)
+
+let link_program gl shaders =
+  let program = Gl.create_program gl in
+  List.iter (Gl.attach_shader gl program) shaders;
+  Gl.link_program gl program;
+  let success = Gl.get_program_parameter gl program Gl.link_status |> Jv.to_bool in
+  if success then
+    Ok program
+  else
+    let info_log = Gl.get_program_info_log gl program |> Jstr.to_string in
+    Error (Printf.sprintf "Failed to link program!\n%s" info_log)
+
+let compile_and_link_program gl vertex_shader_source fragment_shader_source =
+  match compile_shader gl Gl.vertex_shader vertex_shader_source with
+  | Error _ as err -> err
+  | Ok vertex_shader ->
+    match compile_shader gl Gl.fragment_shader fragment_shader_source with
+    | Error _ as err ->
+      Gl.delete_shader gl vertex_shader;
+      err
+    | Ok fragment_shader ->
+      let prg = link_program gl [vertex_shader; fragment_shader] in
+      Gl.delete_shader gl vertex_shader;
+      Gl.delete_shader gl fragment_shader;
+      prg
+
+module Vec4 : sig
+  type t = float * float * float * float
+  val to_float32_array: t -> Tarray.float32
+end = struct
+  type t = float * float * float * float
+  let to_float32_array (x, y, z, w) = Tarray.of_float_array Float32 [|x; y; z; w|]
+end
+
+module Vec3 : sig
+  type t = float * float * float
+  val zero: t
+  val scale: float -> t -> t
+  val length: t -> float
+  val normalize: t -> t
+  val dot: t -> t -> float
+  val cross: t -> t -> t
+  val add: t -> t -> t
+  val sub: t -> t -> t
+end = struct
+  type t = float * float * float
+
+  let zero = (0., 0., 0.)
+
+  let add (x1, y1, z1) (x2, y2, z2) =
+    (x1 +. x2, y1 +. y2, z1 +. z2)
+
+  let sub (x1, y1, z1) (x2, y2, z2) =
+    (x1 -. x2, y1 -. y2, z1 -. z2)
+
+  let dot (x1, y1, z1) (x2, y2, z2) =
+    x1 *. x2 +. y1 *. y2 +. z1 *. z2
+
+  let cross (x1, y1, z1) (x2, y2, z2) =
+    (y1 *. z2 -. z1 *. y2, z1 *. x2 -. x1 *. z2, x1 *. y2 -. y1 *. x2)
+
+  let scale a (x, y, z) =
+    (a *. x, a *. y, a *. z)
+
+  let length v =
+    Float.sqrt (dot v v)
+
+  let normalize v =
+    scale (1. /. length v) v
+end
+
+module Mat4 : sig
+  type t
+  val to_float32_array: t -> Tarray.float32
+  val look_at: Vec3.t -> Vec3.t -> Vec3.t -> t
+  val perspective: float -> float -> float -> float -> t
+end = struct
+  type t =
+    {
+      m11: float; m12: float; m13: float; m14: float;
+      m21: float; m22: float; m23: float; m24: float;
+      m31: float; m32: float; m33: float; m34: float;
+      m41: float; m42: float; m43: float; m44: float;
+    }
+
+  let to_float32_array {m11; m12; m13; m14; m21; m22; m23; m24; m31; m32; m33; m34; m41; m42; m43; m44} =
+    Tarray.of_float_array Float32 [|m11; m21; m31; m41; m12; m22; m32; m42; m13; m23; m33; m43; m14; m24; m34; m44|]
+
+  let zero =
+    {m11 = 0.; m12 = 0.; m13 = 0.; m14 = 0.;
+     m21 = 0.; m22 = 0.; m23 = 0.; m24 = 0.;
+     m31 = 0.; m32 = 0.; m33 = 0.; m34 = 0.;
+     m41 = 0.; m42 = 0.; m43 = 0.; m44 = 0.}
+
+  let identity =
+    {zero with m11 = 1.; m22 = 1.; m33 = 1.; m44 = 1.}
+
+  let look_at eye target up =
+    let (fx, fy, fz) as forward = Vec3.normalize (Vec3.sub eye target) in
+    let (rx, ry, rz) as right = Vec3.normalize (Vec3.cross up forward) in
+    let (ux, uy, uz) as up = Vec3.cross forward right in
+    let tx = Vec3.dot eye right in
+    let ty = Vec3.dot eye up in
+    let tz = Vec3.dot eye forward in
+    {identity with
+     m11 = rx; m12 = ry; m13 = rz;
+     m21 = ux; m22 = uy; m23 = uz;
+     m31 = fx; m32 = fy; m33 = fz;
+     m14 = -.tx; m24 = -.ty; m34 = -.tz}
+
+  let perspective fov aspect near far =
+    let f = Float.tan (Float.pi *. 0.5 -. 0.5 *. fov) in
+    let range_inv = 1. /. (near -. far) in
+    {zero with
+     m11 = f /. aspect;
+     m22 = f;
+     m33 =  (near +. far) *. range_inv;
+     m43 = -1.;
+     m34 = near *. far *. range_inv *. 2.}
+end
+
+let vertices =
+  [|
+    -0.5; 0.5; -0.5;  (* 0 front top left *)
+    0.5; 0.5; -0.5;   (* 1 front top right *)
+    0.5; -0.5; -0.5;  (* 2 front bottom right *)
+    -0.5; -0.5; -0.5; (* 3 front bottom left *)
+    -0.5; 0.5; 0.5;   (* 4 back top left *)
+    0.5; 0.5; 0.5;    (* 5 back top right *)
+    0.5; -0.5; 0.5;   (* 6 back bottom right *)
+    -0.5; -0.5; 0.5;  (* 7 back bottom left *)
+  |]
+
+let indices =
+  [| 0; 1; 1; 2; 2; 3; 3; 0;
+     4; 5; 5; 6; 6; 7; 7; 4;
+     0; 4; 1; 5; 2; 6; 3; 7 |]
+
+let init_mesh gl prg =
+  let vbo = Gl.create_buffer gl in
+  let ebo = Gl.create_buffer gl in
+  Gl.bind_buffer gl Gl.array_buffer (Some vbo);
+  Gl.buffer_data gl Gl.array_buffer (Tarray.of_float_array Float32 vertices) Gl.static_draw;
+  Gl.bind_buffer gl Gl.element_array_buffer (Some ebo);
+  Gl.buffer_data gl Gl.element_array_buffer (Tarray.of_int_array Uint8 indices) Gl.static_draw;
+  let pos_loc = Gl.get_attrib_location gl prg (Jstr.v "pos") in
+  Gl.vertex_attrib_pointer gl pos_loc 3 Gl.float false 0 0;
+  Gl.enable_vertex_attrib_array gl pos_loc
+
+let draw_mesh gl view_loc eye =
+  let view = Mat4.look_at eye (0., 0., 0.) (0., 1., 0.) in
+  Gl.clear gl Gl.color_buffer_bit;
+  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array view);
+  Gl.draw_elements gl Gl.lines (Array.length indices) Gl.unsigned_byte 0
+
+let run gl prg width height =
+  Gl.use_program gl prg;
+  Gl.clear_color gl 1. 1. 1. 1.;
+  init_mesh gl prg;
+  let view_loc = Gl.get_uniform_location gl prg (Jstr.v "view") in
+  let proj_loc = Gl.get_uniform_location gl prg (Jstr.v "proj") in
+  let proj = Mat4.perspective (Float.pi *. 0.25) (width /. height) 0.1 1000. in
+  Gl.uniform_matrix4fv gl proj_loc false (Mat4.to_float32_array proj);
+  let cam_speed = Float.pi *. 0.25 in (* 45 degrees per second *)
+  let cam_radius = 2. in (* camera distance from the origin *)
+  let rec loop cam_angle prev_now now =
+    let delta = (now -. prev_now) *. 0.001 in (* seconds *)
+    (* Update FPS *)
+    Document.set_title G.document (Printf.ksprintf Jstr.v "%.0f" (1. /. delta));
+    (* Update camera angle *)
+    let cam_angle = cam_angle +. cam_speed *. delta in
+    (* Update the camera position *)
+    let eye = (Float.sin cam_angle *. cam_radius, 1.2, Float.cos cam_angle *. cam_radius) in
+    (* Render the scene *)
+    draw_mesh gl view_loc eye;
+    (* Loop *)
+    ignore (G.request_animation_frame (loop cam_angle now))
+  in
+  ignore (G.request_animation_frame (loop 0. 0.))
+
+let vertex_shader_source = {glsl|#version 300 es
+in vec3 pos;
+uniform mat4 view;
+uniform mat4 proj;
+void main() {
+  gl_Position = proj * view * vec4(pos, 1.0);
+}
+|glsl}
+
+let fragment_shader_source = {glsl|#version 300 es
+precision highp float;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(0, 0, 0, 1);
+}
+|glsl}
+
+let main () =
+  let w, h = 1200, 800 in
+  let canvas = Canvas.create ~w ~h [] in
+  El.set_children (Document.body G.document) [Canvas.to_el canvas];
+  match Gl.get_context canvas with
+  | None ->
+    Error "Could not initialize WebGL"
+  | Some gl ->
+    match compile_and_link_program gl vertex_shader_source fragment_shader_source with
+    | Error _ as err -> err
+    | Ok prg ->
+      run gl prg (float w) (float h);
+      Ok ()
+
+let () =
+  match main () with
+  | Error s -> Printf.eprintf "Error: %s" s
+  | Ok () -> ()
