@@ -160,11 +160,42 @@ let init_mesh gl prg =
   Gl.vertex_attrib_pointer gl pos_loc 3 Gl.float false 0 0;
   Gl.enable_vertex_attrib_array gl pos_loc
 
-let draw_mesh gl view_loc eye =
-  let view = Mat4.look_at eye (0., 0., 0.) (0., 1., 0.) in
+type camera =
+  {
+    pos: Vec3.t;
+    front: Vec3.t;
+    up: Vec3.t;
+  }
+
+let look_at {pos; front; up} =
+  Mat4.look_at pos (Vec3.add pos front) up
+
+let draw_mesh gl view_loc camera =
   Gl.clear gl Gl.color_buffer_bit;
-  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array view);
+  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array (look_at camera));
   Gl.draw_elements gl Gl.lines (Array.length indices) Gl.unsigned_byte 0
+
+let get_key =
+  let handler f ev =
+    let code = Jstr.to_string (Ev.Keyboard.code (Ev.as_type ev)) in
+    match code with
+    | "KeyA" | "KeyW" | "KeyD" | "KeyS" -> Ev.prevent_default ev; f code
+    | _ -> ()
+  in
+  let h = Hashtbl.create 0 in
+  let onkeydown code = Hashtbl.replace h code () in
+  let onkeyup code = Hashtbl.remove h code in
+  ignore (Ev.listen Ev.keydown (handler onkeydown) (Window.as_target G.window));
+  ignore (Ev.listen Ev.keyup (handler onkeyup) (Window.as_target G.window));
+  Hashtbl.mem h
+
+let process_input delta {pos; front; up} =
+  let speed = 0.5 *. delta in
+  let pos = if get_key "KeyW" then Vec3.add pos (Vec3.scale speed front) else pos in
+  let pos = if get_key "KeyS" then Vec3.sub pos (Vec3.scale speed front) else pos in
+  let pos = if get_key "KeyA" then Vec3.sub pos (Vec3.scale speed (Vec3.cross front up)) else pos in
+  let pos = if get_key "KeyD" then Vec3.add pos (Vec3.scale speed (Vec3.cross front up)) else pos in
+  {pos; front; up}
 
 let run gl prg width height =
   Gl.use_program gl prg;
@@ -174,22 +205,19 @@ let run gl prg width height =
   let proj_loc = Gl.get_uniform_location gl prg (Jstr.v "proj") in
   let proj = Mat4.perspective (Float.pi *. 0.25) (width /. height) 0.1 1000. in
   Gl.uniform_matrix4fv gl proj_loc false (Mat4.to_float32_array proj);
-  let cam_speed = Float.pi *. 0.25 in (* 45 degrees per second *)
-  let cam_radius = 2. in (* camera distance from the origin *)
-  let rec loop cam_angle prev_now now =
+  let rec loop camera prev_now now =
     let delta = (now -. prev_now) *. 0.001 in (* seconds *)
     (* Update FPS *)
     Document.set_title G.document (Printf.ksprintf Jstr.v "%.0f" (1. /. delta));
-    (* Update camera angle *)
-    let cam_angle = cam_angle +. cam_speed *. delta in
     (* Update the camera position *)
-    let eye = (Float.sin cam_angle *. cam_radius, 1.2, Float.cos cam_angle *. cam_radius) in
+    let camera = process_input delta camera in
     (* Render the scene *)
-    draw_mesh gl view_loc eye;
+    draw_mesh gl view_loc camera;
     (* Loop *)
-    ignore (G.request_animation_frame (loop cam_angle now))
+    ignore (G.request_animation_frame (loop camera now))
   in
-  ignore (G.request_animation_frame (loop 0. 0.))
+  let camera = {pos = (0., 0., -5.); front = (0., 0., 5.); up = (0., 1., 0.)} in
+  ignore (G.request_animation_frame (loop camera 0.))
 
 let vertex_shader_source = {glsl|#version 300 es
 in vec3 pos;
