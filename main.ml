@@ -205,9 +205,9 @@ type camera =
 let look_at {pos; front; up} =
   Mat4.look_at pos (Vec3.add pos front) up
 
-let draw_mesh gl view_loc view =
+let draw_mesh gl trans_loc trans =
   Gl.clear gl Gl.color_buffer_bit;
-  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array view);
+  Gl.uniform_matrix4fv gl trans_loc false (Mat4.to_float32_array trans);
   Gl.draw_elements gl Gl.lines (Array.length indices) Gl.unsigned_byte 0
 
 let get_key =
@@ -252,7 +252,7 @@ let process_input delta {pos; front; up; yaw; pitch} =
   let pos = if get_key "Space" then Vec3.add pos (Vec3.scale speed up) else pos in
   let pos = if get_key "ShiftLeft" then Vec3.sub pos (Vec3.scale speed up) else pos in
   let dx, dy = get_moved () in
-  let sensitivity = 0.001 in
+  let sensitivity = 0.005 in
   let yaw = yaw +. sensitivity *. dx and pitch = pitch -. sensitivity *. dy in
   let pitch =
     let limit = Float.pi *. 0.5 -. 0.1 in
@@ -266,10 +266,8 @@ let run gl prg width height =
   Gl.use_program gl prg;
   Gl.clear_color gl 1. 1. 1. 1.;
   init_mesh gl prg;
-  let view_loc = Gl.get_uniform_location gl prg (Jstr.v "view") in
-  let proj_loc = Gl.get_uniform_location gl prg (Jstr.v "proj") in
+  let trans_loc = Gl.get_uniform_location gl prg (Jstr.v "trans") in
   let proj = Mat4.perspective (Float.pi *. 0.25) (width /. height) 0.1 1000. in
-  Gl.uniform_matrix4fv gl proj_loc false (Mat4.to_float32_array proj);
   let rec loop camera angle prev_now now =
     let delta = (now -. prev_now) *. 0.001 in (* seconds *)
     (* Update FPS *)
@@ -278,8 +276,8 @@ let run gl prg width height =
     (* Update the camera position *)
     let camera = process_input delta camera in
     (* Render the scene *)
-    let view = Mat4.mul (look_at camera) (Mat4.rotation_y angle) in
-    draw_mesh gl view_loc view;
+    let trans = Mat4.mul proj (Mat4.mul (look_at camera) (Mat4.rotation_y angle)) in
+    draw_mesh gl trans_loc trans;
     (* Loop *)
     ignore (G.request_animation_frame (loop camera angle now))
   in
@@ -296,10 +294,9 @@ let run gl prg width height =
 
 let vertex_shader_source = {glsl|#version 300 es
 in vec3 pos;
-uniform mat4 view;
-uniform mat4 proj;
+uniform mat4 trans;
 void main() {
-  gl_Position = proj * view * vec4(pos, 1.0);
+  gl_Position = trans * vec4(pos, 1.0);
 }
 |glsl}
 
