@@ -85,6 +85,8 @@ end
 module Mat4 : sig
   type t
   val to_float32_array: t -> Tarray.float32
+  val rotation_y: float -> t
+  val mul: t -> t -> t
   val look_at: Vec3.t -> Vec3.t -> Vec3.t -> t
   val perspective: float -> float -> float -> float -> t
 end = struct
@@ -107,6 +109,37 @@ end = struct
 
   let identity =
     {zero with m11 = 1.; m22 = 1.; m33 = 1.; m44 = 1.}
+
+  let mul
+      {m11 = a11; m12 = a12; m13 = a13; m14 = a14;
+       m21 = a21; m22 = a22; m23 = a23; m24 = a24;
+       m31 = a31; m32 = a32; m33 = a33; m34 = a34;
+       m41 = a41; m42 = a42; m43 = a43; m44 = a44}
+      {m11 = b11; m12 = b12; m13 = b13; m14 = b14;
+       m21 = b21; m22 = b22; m23 = b23; m24 = b24;
+       m31 = b31; m32 = b32; m33 = b33; m34 = b34;
+       m41 = b41; m42 = b42; m43 = b43; m44 = b44}
+    =
+    {m11 = a11 *. b11 +. a12 *. b21 +. a13 *. b31 +. a14 *. b41;
+     m12 = a11 *. b12 +. a12 *. b22 +. a13 *. b32 +. a14 *. b42;
+     m13 = a11 *. b13 +. a12 *. b23 +. a13 *. b33 +. a14 *. b43;
+     m14 = a11 *. b14 +. a12 *. b24 +. a13 *. b34 +. a14 *. b44;
+     m21 = a21 *. b11 +. a22 *. b21 +. a23 *. b31 +. a24 *. b41;
+     m22 = a21 *. b12 +. a22 *. b22 +. a23 *. b32 +. a24 *. b42;
+     m23 = a21 *. b13 +. a22 *. b23 +. a23 *. b33 +. a24 *. b43;
+     m24 = a21 *. b14 +. a22 *. b24 +. a23 *. b34 +. a24 *. b44;
+     m31 = a31 *. b11 +. a32 *. b21 +. a33 *. b31 +. a34 *. b41;
+     m32 = a31 *. b12 +. a32 *. b22 +. a33 *. b32 +. a34 *. b42;
+     m33 = a31 *. b13 +. a32 *. b23 +. a33 *. b33 +. a34 *. b43;
+     m34 = a31 *. b14 +. a32 *. b24 +. a33 *. b34 +. a34 *. b44;
+     m41 = a41 *. b11 +. a42 *. b21 +. a43 *. b31 +. a44 *. b41;
+     m42 = a41 *. b12 +. a42 *. b22 +. a43 *. b32 +. a44 *. b42;
+     m43 = a41 *. b13 +. a42 *. b23 +. a43 *. b33 +. a44 *. b43;
+     m44 = a41 *. b14 +. a42 *. b24 +. a43 *. b34 +. a44 *. b44}
+
+  let rotation_y angle =
+    let c = Float.cos angle and s = Float.sin angle in
+    {identity with m11 = c; m31 = -.s; m13 = s; m33 = c}
 
   let look_at eye target up =
     let (fx, fy, fz) as forward = Vec3.normalize (Vec3.sub eye target) in
@@ -165,21 +198,23 @@ type camera =
     pos: Vec3.t;
     front: Vec3.t;
     up: Vec3.t;
+    yaw: float;
+    pitch: float;
   }
 
 let look_at {pos; front; up} =
   Mat4.look_at pos (Vec3.add pos front) up
 
-let draw_mesh gl view_loc camera =
+let draw_mesh gl view_loc view =
   Gl.clear gl Gl.color_buffer_bit;
-  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array (look_at camera));
+  Gl.uniform_matrix4fv gl view_loc false (Mat4.to_float32_array view);
   Gl.draw_elements gl Gl.lines (Array.length indices) Gl.unsigned_byte 0
 
 let get_key =
   let handler f ev =
     let code = Jstr.to_string (Ev.Keyboard.code (Ev.as_type ev)) in
     match code with
-    | "KeyA" | "KeyW" | "KeyD" | "KeyS" -> Ev.prevent_default ev; f code
+    | "KeyA" | "KeyW" | "KeyD" | "KeyS" | "Space" | "ShiftLeft" -> Ev.prevent_default ev; f code
     | _ -> ()
   in
   let h = Hashtbl.create 0 in
@@ -189,13 +224,43 @@ let get_key =
   ignore (Ev.listen Ev.keyup (handler onkeyup) (Window.as_target G.window));
   Hashtbl.mem h
 
-let process_input delta {pos; front; up} =
-  let speed = 0.5 *. delta in
+let onmousemove, get_moved =
+  let locked = ref false in
+  let onpointerlockchange ev = locked := Option.is_some (Document.pointer_lock_element G.document) in
+  ignore (Ev.listen Ev.pointerlockchange onpointerlockchange (Document.as_target G.document));
+  let moved_x = ref 0. in
+  let moved_y = ref 0. in
+  let onmousemove ev =
+    if !locked then begin
+      let ev = Ev.as_type ev in
+      moved_x := Ev.Mouse.movement_x ev +. !moved_x;
+      moved_y := Ev.Mouse.movement_y ev +. !moved_y
+    end
+  in
+  onmousemove,
+  fun () ->
+    let mx = !moved_x and my = !moved_y in
+    moved_x := 0.; moved_y := 0.;
+    mx, my
+
+let process_input delta {pos; front; up; yaw; pitch} =
+  let speed = 1.5 *. delta in
   let pos = if get_key "KeyW" then Vec3.add pos (Vec3.scale speed front) else pos in
   let pos = if get_key "KeyS" then Vec3.sub pos (Vec3.scale speed front) else pos in
   let pos = if get_key "KeyA" then Vec3.sub pos (Vec3.scale speed (Vec3.cross front up)) else pos in
   let pos = if get_key "KeyD" then Vec3.add pos (Vec3.scale speed (Vec3.cross front up)) else pos in
-  {pos; front; up}
+  let pos = if get_key "Space" then Vec3.add pos (Vec3.scale speed up) else pos in
+  let pos = if get_key "ShiftLeft" then Vec3.sub pos (Vec3.scale speed up) else pos in
+  let dx, dy = get_moved () in
+  let sensitivity = 0.001 in
+  let yaw = yaw +. sensitivity *. dx and pitch = pitch -. sensitivity *. dy in
+  let pitch =
+    let limit = Float.pi *. 0.5 -. 0.1 in
+    let neg_limit = -.limit in
+    if pitch > limit then limit else if pitch < neg_limit then neg_limit else pitch
+  in
+  let front = (Float.cos yaw *. Float.cos pitch, Float.sin pitch, Float.sin yaw *. Float.cos pitch) in
+  {pos; front; up; yaw; pitch}
 
 let run gl prg width height =
   Gl.use_program gl prg;
@@ -205,19 +270,29 @@ let run gl prg width height =
   let proj_loc = Gl.get_uniform_location gl prg (Jstr.v "proj") in
   let proj = Mat4.perspective (Float.pi *. 0.25) (width /. height) 0.1 1000. in
   Gl.uniform_matrix4fv gl proj_loc false (Mat4.to_float32_array proj);
-  let rec loop camera prev_now now =
+  let rec loop camera angle prev_now now =
     let delta = (now -. prev_now) *. 0.001 in (* seconds *)
     (* Update FPS *)
     Document.set_title G.document (Printf.ksprintf Jstr.v "%.0f" (1. /. delta));
+    let angle = angle +. 0.5 *. delta in
     (* Update the camera position *)
     let camera = process_input delta camera in
     (* Render the scene *)
-    draw_mesh gl view_loc camera;
+    let view = Mat4.mul (look_at camera) (Mat4.rotation_y angle) in
+    draw_mesh gl view_loc view;
     (* Loop *)
-    ignore (G.request_animation_frame (loop camera now))
+    ignore (G.request_animation_frame (loop camera angle now))
   in
-  let camera = {pos = (0., 0., -5.); front = (0., 0., 5.); up = (0., 1., 0.)} in
-  ignore (G.request_animation_frame (loop camera 0.))
+  let camera =
+    {
+      pos = (0., 0., -5.);
+      front = (0., 0., 5.);
+      up = (0., 1., 0.);
+      yaw = Float.pi *. 0.5;
+      pitch = 0.;
+    }
+  in
+  ignore (G.request_animation_frame (loop camera 0. 0.))
 
 let vertex_shader_source = {glsl|#version 300 es
 in vec3 pos;
@@ -238,8 +313,16 @@ void main() {
 
 let main () =
   let w, h = 1200, 800 in
-  let canvas = Canvas.create ~w ~h [] in
-  El.set_children (Document.body G.document) [Canvas.to_el canvas];
+  let canvas =
+    let canvas = Canvas.create ~w ~h [] in
+    let el = Canvas.to_el canvas in
+    El.set_inline_style (Jstr.v "border") (Jstr.v "1px solid red") el;
+    El.set_children (Document.body G.document) [el];
+    let onclick ev = Fut.await (El.request_pointer_lock el) ignore in
+    ignore (Ev.listen Ev.mousemove onmousemove (El.as_target el));
+    ignore (Ev.listen Ev.click onclick (El.as_target el));
+    canvas
+  in
   match Gl.get_context canvas with
   | None ->
     Error "Could not initialize WebGL"
