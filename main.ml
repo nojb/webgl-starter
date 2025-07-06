@@ -245,8 +245,8 @@ let onmousemove, get_moved =
 
 let process_input delta {pos; front; up; yaw; pitch} =
   let speed = 1.5 *. delta in
-  let pos = if get_key "KeyW" then Vec3.add pos (Vec3.scale speed front) else pos in
-  let pos = if get_key "KeyS" then Vec3.sub pos (Vec3.scale speed front) else pos in
+  let pos = if get_key "KeyW" then Vec3.add pos (Vec3.scale (2. *. speed) front) else pos in
+  let pos = if get_key "KeyS" then Vec3.sub pos (Vec3.scale (2. *. speed) front) else pos in
   let pos = if get_key "KeyA" then Vec3.sub pos (Vec3.scale speed (Vec3.cross front up)) else pos in
   let pos = if get_key "KeyD" then Vec3.add pos (Vec3.scale speed (Vec3.cross front up)) else pos in
   let pos = if get_key "Space" then Vec3.add pos (Vec3.scale speed up) else pos in
